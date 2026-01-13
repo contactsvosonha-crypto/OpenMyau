@@ -4,21 +4,18 @@ import myau.event.EventTarget;
 import myau.events.UpdateEvent;
 import myau.event.types.EventType;
 import myau.module.Module;
-import myau.property.properties.BooleanProperty;
-import myau.property.properties.ModeProperty;
+import myau.property.properties.*;
 import net.minecraft.client.Minecraft;
 import net.minecraft.entity.EntityLivingBase;
 import net.minecraft.item.ItemBow;
-import net.minecraft.util.MathHelper;
+import net.minecraft.util.Vec3;
 
 public class BowAimbot extends Module {
     private static final Minecraft mc = Minecraft.getMinecraft();
     
     public final BooleanProperty silent = new BooleanProperty("Silent", true);
-    public final BooleanProperty autoRelease = new BooleanProperty("AutoRelease", false);
-    public final ModeProperty priority = new ModeProperty("Priority", 0, new String[]{"DISTANCE", "HEALTH"});
-
-    private EntityLivingBase target = null;
+    public final BooleanProperty predict = new BooleanProperty("Prediction", true);
+    public final DoubleProperty predictSize = new DoubleProperty("Predict Size", 2.0, 0.1, 5.0, () -> predict.getValue());
 
     public BowAimbot() {
         super("BowAimbot", false);
@@ -27,81 +24,63 @@ public class BowAimbot extends Module {
     @EventTarget
     public void onUpdate(UpdateEvent event) {
         if (event.getType() == EventType.PRE) {
-            // Kiểm tra xem người chơi có đang cầm cung và gồng cung không
-            if (mc.thePlayer.getCurrentEquippedItem() != null && mc.thePlayer.getCurrentEquippedItem().getItem() instanceof ItemBow && mc.thePlayer.isUsingItem()) {
-                
-                target = getBestTarget();
-                
+            if (isHoldingBow() && mc.thePlayer.isUsingItem()) {
+                EntityLivingBase target = getBestTarget();
                 if (target != null) {
-                    float[] rotations = calculateArc(target);
+                    Vec3 targetPos = getPredictedPos(target);
+                    float[] rotations = calculateArc(targetPos);
                     
                     if (rotations != null) {
+                        // Sửa lỗi: Sử dụng setRotation thay vì setYaw/setPitch
                         if (silent.getValue()) {
-                            event.setYaw(rotations[0]);
-                            event.setPitch(rotations[1]);
+                            event.setRotation(rotations[0], rotations[1], 1);
                         } else {
                             mc.thePlayer.rotationYaw = rotations[0];
                             mc.thePlayer.rotationPitch = rotations[1];
                         }
-                        
-                        // Tự động bắn khi gồng đủ lực (20 ticks = lực mạnh nhất)
-                        if (autoRelease.getValue() && mc.thePlayer.getItemInUseDuration() >= 20) {
-                            mc.playerController.onStoppedUsingItem(mc.thePlayer);
-                        }
                     }
                 }
-            } else {
-                target = null;
             }
         }
     }
 
-    private float[] calculateArc(EntityLivingBase target) {
-        double x = target.posX - mc.thePlayer.posX;
-        double y = target.posY + (target.getEyeHeight() / 2.0) - (mc.thePlayer.posY + mc.thePlayer.getEyeHeight());
-        double z = target.posZ - mc.thePlayer.posZ;
-        double dist = MathHelper.sqrt_double(x * x + z * z);
+    private Vec3 getPredictedPos(EntityLivingBase target) {
+        double x = target.posX + (target.posX - target.lastTickPosX) * (predict.getValue() ? predictSize.getValue() : 0);
+        double y = target.posY + target.getEyeHeight() / 2.0;
+        double z = target.posZ + (target.posZ - target.lastTickPosZ) * (predict.getValue() ? predictSize.getValue() : 0);
+        return new Vec3(x, y, z);
+    }
 
-        // Tính toán vận tốc mũi tên dựa trên thời gian gồng cung
-        int useCount = mc.thePlayer.getItemInUseDuration();
-        float velocity = useCount / 20.0f;
-        velocity = (velocity * velocity + velocity * 2.0f) / 3.0f;
-        if (velocity > 1.0f) velocity = 1.0f;
-        
-        // Vận tốc thực tế (max là 3.0)
-        float v = velocity * 3.0f;
-        float g = 0.05f; // Gravity
-
-        // Công thức tính góc bắn (Pitch) để trúng mục tiêu ở khoảng cách dist:
-        // theta = atan((v^2 +- sqrt(v^4 - g(gx^2 + 2yv^2))) / gx)
-        float root = (float) (Math.pow(v, 4) - g * (g * Math.pow(dist, 2) + 2 * y * Math.pow(v, 2)));
-
-        if (root < 0) return null; // Không thể bắn tới mục tiêu
-
-        float theta = (float) Math.atan((Math.pow(v, 2) - Math.sqrt(root)) / (g * dist));
-        
-        float yaw = (float) (Math.atan2(z, x) * 180.0D / Math.PI) - 90.0F;
-        float pitch = (float) -(theta * 180.0D / Math.PI);
-
+    private float[] calculateArc(Vec3 pos) {
+        double diffX = pos.xCoord - mc.thePlayer.posX;
+        double diffZ = pos.zCoord - mc.thePlayer.posZ;
+        double diffY = pos.yCoord - (mc.thePlayer.posY + mc.thePlayer.getEyeHeight());
+        double dist = Math.sqrt(diffX * diffX + diffZ * diffZ);
+        float v = getBowVelocity();
+        float g = 0.006f;
+        double root = Math.pow(v, 4) - g * (g * Math.pow(dist, 2) + 2 * diffY * Math.pow(v, 2));
+        if (root < 0) return null;
+        float pitch = (float) -Math.toDegrees(Math.atan((Math.pow(v, 2) - Math.sqrt(root)) / (g * dist)));
+        float yaw = (float) (Math.atan2(diffZ, diffX) * 180.0 / Math.PI) - 90.0f;
         return new float[]{yaw, pitch};
     }
 
-    private EntityLivingBase getBestTarget() {
-        EntityLivingBase best = null;
-        double minVal = Double.MAX_VALUE;
+    private float getBowVelocity() {
+        int duration = mc.thePlayer.getItemInUseDuration();
+        float v = (duration / 20.0f);
+        v = (v * v + v * 2.0f) / 3.0f;
+        return Math.min(v, 1.0f) * 3.0f;
+    }
 
-        for (Object obj : mc.theWorld.loadedEntityList) {
-            if (obj instanceof EntityLivingBase) {
-                EntityLivingBase entity = (EntityLivingBase) obj;
-                if (entity != mc.thePlayer && entity.isEntityAlive() && mc.thePlayer.canEntityBeSeen(entity)) {
-                    double val = priority.getValue() == 0 ? mc.thePlayer.getDistanceToEntity(entity) : entity.getHealth();
-                    if (val < minVal) {
-                        minVal = val;
-                        best = entity;
-                    }
-                }
-            }
-        }
-        return best;
+    private boolean isHoldingBow() {
+        return mc.thePlayer.getCurrentEquippedItem() != null && mc.thePlayer.getCurrentEquippedItem().getItem() instanceof ItemBow;
+    }
+
+    private EntityLivingBase getBestTarget() {
+        return mc.theWorld.loadedEntityList.stream()
+                .filter(e -> e instanceof EntityLivingBase && e != mc.thePlayer)
+                .map(e -> (EntityLivingBase) e)
+                .filter(e -> e.isEntityAlive() && mc.thePlayer.canEntityBeSeen(e))
+                .findFirst().orElse(null);
     }
 }
