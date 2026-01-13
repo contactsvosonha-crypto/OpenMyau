@@ -1,0 +1,35 @@
+name: Build Myau Client
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up JDK 8
+      uses: actions/setup-java@v4
+      with:
+        java-version: '8' # Phải là Java 8 cho Minecraft 1.8.9
+        distribution: 'temurin'
+        cache: gradle
+
+    - name: Grant execute permission for gradlew
+      run: chmod +x gradlew
+
+    - name: Build with Gradle
+      # -x test để bỏ qua các bước kiểm tra không cần thiết, giúp build nhanh hơn
+      run: ./gradlew build -x test
+
+    - name: Upload Build Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: Myau-Client-Jar
+        path: build/libs/*.jar # Đường dẫn lấy file .jar sau khi build xong
